@@ -14,7 +14,7 @@ Tailor-made for 2D game animators and modders working with spritesheets (includi
 - **Manual Offset Adjustments:** Fine-tune X/Y frame alignment on the fly via keyboard controls without touching XML files.
 - **Sequence Queueing:** Combine multiple animation states (e.g., *idle*, *singUP*, *singRIGHT*) into a custom playback order and export them as a single continuous GIF.
 - **Global Bounding Box Calculation:** Prevents sprite clipping and awkward frame jitter by automatically computing a unified canvas size across all frames.
-- **Clean GIF Encoding:** Retains crisp alpha transparency with configurable FPS (1–60) and scaling (0.25x–5.0x).
+- **Clean GIF Encoding:** Retains crisp alpha transparency with configurable FPS and scaling.
 
 ---
 
