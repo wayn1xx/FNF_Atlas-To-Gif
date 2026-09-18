@@ -6,7 +6,7 @@ A lightweight desktop tool built with CustomTkinter to convert Sparrow / Starlin
 
 - **Live Animation Preview**: real-time frame preview with playback controls.
 - **FNF Offset Support**: automatically imports character offsets from adjacent `.json` files.
-- **Manual Offset Adjustments**: fine-tune frame positioning using arrow keys (`Shift` for x10 speed).
+- **Manual Offset Adjustments**: fine-tune frame positioning using arrow keys.
 - **Export Queue**: stitch multiple animations into a single sequence.
 - **Customizable Output**: adjust playback FPS and scaling before export.
 
