@@ -237,6 +237,7 @@ class AtlasToGifApp(ctk.CTk):
         self.pan_offset_y = 0.0
         self._pan_start = None
         self._wheel_debounce_job = None
+        self._last_canvas_size = (0, 0)
 
         # Двухуровневый кэш превью для быстрого зума
         self._raw_anim_cache = {}   # { anim_name: (list_of_pil_frames, min_x, min_y, bw, bh) }
@@ -380,7 +381,7 @@ class AtlasToGifApp(ctk.CTk):
         )
         self.list_available.pack(fill="both", expand=True)
 
-        # Center: Queue Controls
+        # Center: Queue Controls (Ширина кнопок зафиксирована)
         btn_box = ctk.CTkFrame(anim_card, fg_color="transparent")
         btn_box.pack(side="left", padx=6, pady=10)
 
@@ -444,12 +445,14 @@ class AtlasToGifApp(ctk.CTk):
         )
         self.btn_down.pack(pady=4)
 
+        # Кнопка Play Queue с оптимизированным шрифтом, чтобы не расширялась
         self.btn_play_queue = ctk.CTkButton(
             btn_box,
-            text="▶ Play Queue",
+            text="Play Queue",
             width=90,
             height=30,
             corner_radius=6,
+            font=ctk.CTkFont(size=11, weight="bold"),
             fg_color=("#0067c0", "#0078d4"),
             text_color="#ffffff",
             hover_color=("#00539a", "#005a9e"),
@@ -631,7 +634,7 @@ class AtlasToGifApp(ctk.CTk):
         self.selected_avail_idx = None
         self.selected_queue_idx = None
 
-    # --- Mouse Pan & Zoom (Debounced Fast Engine) ---
+    # --- Mouse Pan & Zoom ---
 
     def _on_pan_start(self, event):
         self._pan_start = (event.x, event.y)
@@ -662,13 +665,11 @@ class AtlasToGifApp(ctk.CTk):
 
         self.user_zoom = new_zoom
 
-        # Мгновенно обновляем процент зума в UI
         zoom_pct = int(self.user_zoom * 100)
         total_f = len(self.preview_photo_images) if self.preview_photo_images else 0
         cur_f = (self.preview_frame_idx % total_f) + 1 if total_f > 0 else 0
         self.lbl_preview_info.configure(text=f"Frame: {cur_f} / {total_f}  ({zoom_pct}%)")
 
-        # Дебаунс: сжимаем кадры только после остановки колёсика
         if self._wheel_debounce_job:
             try:
                 self.after_cancel(self._wheel_debounce_job)
@@ -745,31 +746,49 @@ class AtlasToGifApp(ctk.CTk):
             self.cur_off_x.set(0)
             self.cur_off_y.set(0)
 
-    # --- Character Bounds & Calculations ---
+    # --- Character Bounds & Calculations (Охватывает все позы) ---
 
     def get_character_bounds(self):
-        base_anim = self.get_base_animation_name()
-        anims = [base_anim] if base_anim and base_anim in self.animations else list(self.animations.keys())
-        if not anims:
+        """Гарантирует, что абсолютно все анимации влезут в экран и ни одна не улетит за край"""
+        if not self.animations:
             return 0, 0, 300, 300
+
+        if self.is_playing_queue and self.selected_sequence:
+            anims_to_check = set(self.selected_sequence)
+        elif self.active_anim_name:
+            anims_to_check = {self.active_anim_name}
+            base = self.get_base_animation_name()
+            if base:
+                anims_to_check.add(base)
+        else:
+            anims_to_check = set(self.animations.keys())
 
         min_x, min_y = float("inf"), float("inf")
         max_x, max_y = float("-inf"), float("-inf")
-        for a in anims:
-            for st in self.animations.get(a, []):
+        found = False
+
+        for a in anims_to_check:
+            if a not in self.animations:
+                continue
+            off_x, off_y = self.get_anim_offset(a)
+            for st in self.animations[a]:
                 w = int(st.get("width", 0))
                 h = int(st.get("height", 0))
+                if w <= 0 or h <= 0:
+                    continue
                 rotated = st.get("rotated", "false").lower() == "true"
                 cw, ch = (h, w) if rotated else (w, h)
-                fx = -int(st.get("frameX", 0))
-                fy = -int(st.get("frameY", 0))
+                fx = -int(st.get("frameX", 0)) + off_x
+                fy = -int(st.get("frameY", 0)) + off_y
                 min_x = min(min_x, fx)
                 min_y = min(min_y, fy)
                 max_x = max(max_x, fx + cw)
                 max_y = max(max_y, fy + ch)
+                found = True
 
-        if min_x == float("inf"):
+        if not found or min_x == float("inf"):
             return 0, 0, 300, 300
+
         return int(min_x), int(min_y), int(max_x), int(max_y)
 
     def get_global_bbox(self, specific_anims=None):
@@ -817,7 +836,7 @@ class AtlasToGifApp(ctk.CTk):
         if cache_key in self._anim_cache:
             return self._anim_cache[cache_key]
 
-        # 1. Сборка сырых мастер-кадров (один раз)
+        # 1. Сборка сырых мастер-кадров
         if anim_name not in self._raw_anim_cache:
             if not self.loaded_atlas:
                 self.loaded_atlas = Image.open(self.png_path.get()).convert("RGBA")
@@ -831,6 +850,8 @@ class AtlasToGifApp(ctk.CTk):
             for st in subtextures:
                 w = int(st.get("width", 0))
                 h = int(st.get("height", 0))
+                if w <= 0 or h <= 0:
+                    continue
                 rotated = st.get("rotated", "false").lower() == "true"
                 cw, ch = (h, w) if rotated else (w, h)
                 fx = -int(st.get("frameX", 0))
@@ -840,6 +861,9 @@ class AtlasToGifApp(ctk.CTk):
                 max_x = max(max_x, fx + cw)
                 max_y = max(max_y, fy + ch)
 
+            if min_x == float("inf"):
+                return [], 0, 0
+
             bw = max(1, int(max_x - min_x))
             bh = max(1, int(max_y - min_y))
 
@@ -847,6 +871,8 @@ class AtlasToGifApp(ctk.CTk):
             for st in subtextures:
                 x, y = int(st.get("x", 0)), int(st.get("y", 0))
                 w, h = int(st.get("width", 0)), int(st.get("height", 0))
+                if w <= 0 or h <= 0:
+                    continue
                 rotated = st.get("rotated", "false").lower() == "true"
                 fx = -int(st.get("frameX", 0))
                 fy = -int(st.get("frameY", 0))
@@ -861,7 +887,7 @@ class AtlasToGifApp(ctk.CTk):
 
             self._raw_anim_cache[anim_name] = (raw_frames, int(min_x), int(min_y), bw, bh)
 
-        # 2. Мгновенное масштабирование мастер-кадров
+        # 2. Быстрое масштабирование
         raw_frames, min_x, min_y, bw, bh = self._raw_anim_cache[anim_name]
         ratio = self.preview_scale_ratio
         tw = max(1, int(bw * ratio))
@@ -876,22 +902,31 @@ class AtlasToGifApp(ctk.CTk):
         return photos, min_x, min_y
 
     def _draw_or_move(self, img, draw_x, draw_y):
-        if self.preview_canvas_img_id is None or not self.canvas_preview.find_withtag(self.preview_canvas_img_id):
-            self.canvas_preview.delete("all")
-            self.preview_canvas_img_id = self.canvas_preview.create_image(draw_x, draw_y, image=img, anchor="nw")
-        else:
-            self.canvas_preview.coords(self.preview_canvas_img_id, draw_x, draw_y)
-            self.canvas_preview.itemconfig(self.preview_canvas_img_id, image=img)
+        try:
+            if self.preview_canvas_img_id is None or not self.canvas_preview.find_withtag(self.preview_canvas_img_id):
+                self.canvas_preview.delete("all")
+                self.preview_canvas_img_id = self.canvas_preview.create_image(draw_x, draw_y, image=img, anchor="nw")
+            else:
+                self.canvas_preview.coords(self.preview_canvas_img_id, draw_x, draw_y)
+                self.canvas_preview.itemconfig(self.preview_canvas_img_id, image=img)
+            # Защита от случайного удаления сборщиком мусора
+            self.canvas_preview._current_img = img
+        except Exception:
+            pass
 
     def _update_current_canvas_pos(self):
         """Мгновенное обновление позиции при панорамировании ПКМ и стрелочках"""
         if not self.preview_photo_images or self.preview_canvas_img_id is None:
             return
-        idx = self.preview_frame_idx % len(self.preview_photo_images)
+        total_p = len(self.preview_photo_images)
+        if total_p == 0:
+            return
+        idx = self.preview_frame_idx % total_p
         if self.is_playing_queue and self.preview_frame_meta:
-            anim_name, a_min_x, a_min_y = self.preview_frame_meta[idx]
+            m_idx = idx % len(self.preview_frame_meta)
+            anim_name, a_min_x, a_min_y = self.preview_frame_meta[m_idx]
         else:
-            anim_name = self.active_anim_name
+            anim_name = self.active_anim_name or ""
             a_min_x = self.preview_anim_min_x
             a_min_y = self.preview_anim_min_y
 
@@ -903,6 +938,12 @@ class AtlasToGifApp(ctk.CTk):
     def _on_canvas_configure(self, event):
         if not self.preview_enabled.get():
             return
+        # Игнорируем микро-сдвиги на 1-2 пикселя, чтобы не вызывать паразитные сбросы
+        if hasattr(self, "_last_canvas_size"):
+            if abs(event.width - self._last_canvas_size[0]) < 3 and abs(event.height - self._last_canvas_size[1]) < 3:
+                return
+        self._last_canvas_size = (event.width, event.height)
+
         if self.canvas_resize_job:
             try:
                 self.after_cancel(self.canvas_resize_job)
@@ -924,7 +965,7 @@ class AtlasToGifApp(ctk.CTk):
         char_cx = (bx1 + bx2) / 2.0
         char_cy = (by1 + by2) / 2.0
 
-        base_ratio = min((cw - 32) / char_w, (ch - 32) / char_h, 1.0)
+        base_ratio = max(0.01, min((cw - 32) / char_w, (ch - 32) / char_h, 1.0))
         self.preview_scale_ratio = base_ratio * self.user_zoom
 
         self.canvas_origin_x = (cw / 2.0) - (char_cx * self.preview_scale_ratio)
@@ -1040,13 +1081,13 @@ class AtlasToGifApp(ctk.CTk):
     def update_queue_btn_ui(self):
         if self.is_playing_queue:
             self.btn_play_queue.configure(
-                text="⏹ Stop Queue",
+                text="Stop Queue",
                 fg_color=("#a82323", "#c42b2b"),
                 hover_color=("#8a1c1c", "#a82323"),
             )
         else:
             self.btn_play_queue.configure(
-                text="▶ Play Queue",
+                text="Play Queue",
                 fg_color=("#0067c0", "#0078d4"),
                 hover_color=("#00539a", "#005a9e"),
             )
@@ -1100,11 +1141,12 @@ class AtlasToGifApp(ctk.CTk):
 
             self.preview_frame_idx = start_idx % len(self.preview_photo_images)
             zoom_pct = int(self.user_zoom * 100)
-            self.lbl_preview_info.configure(
-                text=f"Frame: {self.preview_frame_idx + 1} / {len(self.preview_photo_images)}  ({zoom_pct}%)"
-            )
 
             anim_name, ax, ay = self.preview_frame_meta[self.preview_frame_idx]
+            self.lbl_preview_info.configure(
+                text=f"[{anim_name}] Frame: {self.preview_frame_idx + 1} / {len(self.preview_photo_images)}  ({zoom_pct}%)"
+            )
+
             off = self.get_anim_offset(anim_name)
             draw_x = int(self.canvas_origin_x + self.pan_offset_x + (ax + off[0]) * self.preview_scale_ratio)
             draw_y = int(self.canvas_origin_y + self.pan_offset_y + (ay + off[1]) * self.preview_scale_ratio)
@@ -1118,30 +1160,39 @@ class AtlasToGifApp(ctk.CTk):
         if not self.preview_enabled.get() or not self.preview_photo_images:
             return
 
-        self.preview_frame_idx = self.preview_frame_idx % len(self.preview_photo_images)
-        img = self.preview_photo_images[self.preview_frame_idx]
+        try:
+            total_f = len(self.preview_photo_images)
+            if total_f == 0:
+                return
 
-        if self.is_playing_queue and self.preview_frame_meta:
-            anim_name, ax, ay = self.preview_frame_meta[self.preview_frame_idx]
-        else:
-            anim_name = self.active_anim_name
-            ax = self.preview_anim_min_x
-            ay = self.preview_anim_min_y
+            self.preview_frame_idx = self.preview_frame_idx % total_f
+            img = self.preview_photo_images[self.preview_frame_idx]
 
-        off = self.get_anim_offset(anim_name)
-        draw_x = int(self.canvas_origin_x + self.pan_offset_x + (ax + off[0]) * self.preview_scale_ratio)
-        draw_y = int(self.canvas_origin_y + self.pan_offset_y + (ay + off[1]) * self.preview_scale_ratio)
+            if self.is_playing_queue and self.preview_frame_meta:
+                meta_idx = self.preview_frame_idx % len(self.preview_frame_meta)
+                anim_name, ax, ay = self.preview_frame_meta[meta_idx]
+            else:
+                anim_name = self.active_anim_name or ""
+                ax = self.preview_anim_min_x
+                ay = self.preview_anim_min_y
 
-        self._draw_or_move(img, draw_x, draw_y)
+            off = self.get_anim_offset(anim_name)
+            draw_x = int(self.canvas_origin_x + self.pan_offset_x + (ax + off[0]) * self.preview_scale_ratio)
+            draw_y = int(self.canvas_origin_y + self.pan_offset_y + (ay + off[1]) * self.preview_scale_ratio)
 
-        zoom_pct = int(self.user_zoom * 100)
-        self.lbl_preview_info.configure(
-            text=f"Frame: {self.preview_frame_idx + 1} / {len(self.preview_photo_images)}  ({zoom_pct}%)"
-        )
+            self._draw_or_move(img, draw_x, draw_y)
 
-        self.preview_frame_idx = (self.preview_frame_idx + 1) % len(self.preview_photo_images)
-        delay = max(15, int(1000 / max(1, self.fps_val.get())))
-        self.preview_loop_job = self.after(delay, self.run_preview_loop)
+            zoom_pct = int(self.user_zoom * 100)
+            prefix = f"[{anim_name}] " if self.is_playing_queue else ""
+            self.lbl_preview_info.configure(
+                text=f"{prefix}Frame: {self.preview_frame_idx + 1} / {total_f}  ({zoom_pct}%)"
+            )
+
+            self.preview_frame_idx = (self.preview_frame_idx + 1) % total_f
+            delay = max(15, int(1000 / max(1, self.fps_val.get())))
+            self.preview_loop_job = self.after(delay, self.run_preview_loop)
+        except Exception:
+            pass
 
     # --- Lists and Selection ---
 
